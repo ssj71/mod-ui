@@ -212,6 +212,7 @@ class Host(object):
         Protocol.register_cmd_callback("control_get", self.hmi_parameter_get)
         Protocol.register_cmd_callback("control_set", self.hmi_parameter_set)
         Protocol.register_cmd_callback("control_next", self.hmi_parameter_addressing_next)
+        Protocol.register_cmd_callback("control_prev", self.hmi_parameter_addressing_prev)
         Protocol.register_cmd_callback("pedalboard_save", self.hmi_save_current_pedalboard)
         Protocol.register_cmd_callback("pedalboard_reset", self.hmi_reset_current_pedalboard)
         Protocol.register_cmd_callback("tuner", self.hmi_tuner)
@@ -2241,6 +2242,19 @@ _:b%i
         else:
             self.hmi.control_clean(actuator_hw[0], actuator_hw[1], actuator_hw[2], actuator_hw[3], callback)
 
+    def _address_prev(self, actuator_hw, callback):
+        actuator_uri = self._hw2uri_map[actuator_hw]
+
+        addressings       = self.addressings[actuator_uri]
+        addressings_addrs = addressings['addrs']
+        addressings_idx   = addressings['idx']
+
+        if len(addressings_addrs) > 0:
+            addressings['idx'] = (addressings_idx - 1) % len(addressings_addrs)
+            self._addressing_load(actuator_uri, callback)
+        else:
+            self.hmi.control_clean(actuator_hw[0], actuator_hw[1], actuator_hw[2], actuator_hw[3], callback)
+
     def _unaddress(self, pluginData, port):
         addressing = pluginData['addressings'].pop(port, None)
         if addressing is None:
@@ -2489,6 +2503,11 @@ _:b%i
         logging.info("hmi parameter addressing next")
         actuator_hw = (hardware_type, hardware_id, actuator_type, actuator_id)
         self._address_next(actuator_hw, callback)
+
+    def hmi_parameter_addressing_prev(self, hardware_type, hardware_id, actuator_type, actuator_id, callback):
+        logging.info("hmi parameter addressing prev")
+        actuator_hw = (hardware_type, hardware_id, actuator_type, actuator_id)
+        self._address_prev(actuator_hw, callback)
 
     def hmi_save_current_pedalboard(self, callback):
         logging.info("hmi save current pedalboard")

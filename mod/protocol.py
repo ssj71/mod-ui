@@ -93,6 +93,7 @@ class Protocol(object):
         "control_set": [int, str, float],
         "control_get": [int, str],
         "control_next": [int, int, int, int],
+        "control_prev": [int, int, int, int],
         "tuner": [str],
         "tuner_input": [int],
         "pedalboard_save": [],
