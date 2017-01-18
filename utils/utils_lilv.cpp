@@ -32,14 +32,19 @@
 #include "lv2/lv2plug.in/ns/ext/presets/presets.h"
 #include "lv2/lv2plug.in/ns/extensions/units/units.h"
 
+#include "sha1/sha1.h"
+
 #include <algorithm>
 #include <cassert>
+#include <fstream>
 #include <list>
 #include <map>
 #include <string>
 #include <vector>
 
 #define OS_SEP '/'
+
+#define MOD_LICENSE__interface "http://moddevices.com/ns/ext/license#interface"
 
 #ifndef HAVE_NEW_LILV
 #warning Your current lilv version is too old, please update it
@@ -80,6 +85,10 @@ std::map<std::string, PluginInfo_Mini> PLUGNFO_Mini;
 // list of plugins that need reload (preset data only)
 std::list<std::string> PLUGINStoReload;
 
+// read KEYS_PATH. NOTE: assumes trailing separator
+static const char* const KEYS_PATH = getenv("MOD_KEYS_PATH");
+static const size_t KEYS_PATHlen = (KEYS_PATH != NULL && *KEYS_PATH != '\0') ? strlen(KEYS_PATH) : 0;
+
 // some other cached values
 static const char* const HOME = getenv("HOME");
 static size_t HOMElen = strlen(HOME);
@@ -87,7 +96,7 @@ static size_t HOMElen = strlen(HOME);
 #define PluginInfo_Mini_Init {                   \
     false,                                       \
     nullptr, nullptr, nullptr, nullptr, nullptr, \
-    nullptr, 0, 0, 0, 0, false,                  \
+    nullptr, 0, 0, 0, 0, 0,                      \
     { nullptr, nullptr, nullptr }                \
 }
 
@@ -95,7 +104,7 @@ static size_t HOMElen = strlen(HOME);
     false,                                           \
     nullptr, nullptr,                                \
     nullptr, nullptr, nullptr, nullptr, nullptr,     \
-    nullptr, 0, 0, 0, 0, false,                      \
+    nullptr, 0, 0, 0, 0, 0,                          \
     nullptr, nullptr,                                \
     { nullptr, nullptr, nullptr },                   \
     nullptr,                                         \
@@ -131,6 +140,23 @@ inline bool ends_with(const std::string& value, const std::string ending)
     return std::equal(ending.rbegin(), ending.rend(), value.rbegin());
 }
 
+inline std::string sha1(const char* const cstring)
+{
+    sha1nfo s;
+    sha1_init(&s);
+    sha1_write(&s, cstring, strlen(cstring));
+
+    char hashdec[HASH_LENGTH*2+1];
+
+    uint8_t* const hashenc = sha1_result(&s);
+    for (int i=0; i<HASH_LENGTH; i++) {
+        sprintf(hashdec+(i*2), "%02x", hashenc[i]);
+    }
+    hashdec[HASH_LENGTH*2] = '\0';
+
+    return std::string(hashdec);
+}
+
 // --------------------------------------------------------------------------------------------------------
 
 #define LILV_NS_INGEN    "http://drobilla.net/ns/ingen#"
@@ -147,6 +173,7 @@ struct NamespaceDefinitions_Mini {
     LilvNode* const mod_label;
     LilvNode* const mod_release;
     LilvNode* const mod_builder;
+    LilvNode* const modlicense_interface;
     LilvNode* const modgui_gui;
     LilvNode* const modgui_resourcesDirectory;
     LilvNode* const modgui_screenshot;
@@ -161,6 +188,7 @@ struct NamespaceDefinitions_Mini {
           mod_label                (lilv_new_uri(W, LILV_NS_MOD    "label"             )),
           mod_release              (lilv_new_uri(W, LILV_NS_MOD    "releaseNumber"     )),
           mod_builder              (lilv_new_uri(W, LILV_NS_MOD    "builderVersion"    )),
+          modlicense_interface     (lilv_new_uri(W, MOD_LICENSE__interface             )),
           modgui_gui               (lilv_new_uri(W, LILV_NS_MODGUI "gui"               )),
           modgui_resourcesDirectory(lilv_new_uri(W, LILV_NS_MODGUI "resourcesDirectory")),
           modgui_screenshot        (lilv_new_uri(W, LILV_NS_MODGUI "screenshot"        )),
@@ -176,6 +204,7 @@ struct NamespaceDefinitions_Mini {
         lilv_node_free(mod_label);
         lilv_node_free(mod_release);
         lilv_node_free(mod_builder);
+        lilv_node_free(modlicense_interface);
         lilv_node_free(modgui_gui);
         lilv_node_free(modgui_resourcesDirectory);
         lilv_node_free(modgui_screenshot);
@@ -210,6 +239,7 @@ struct NamespaceDefinitions {
     LilvNode* const mod_rangeSteps;
     LilvNode* const mod_release;
     LilvNode* const mod_builder;
+    LilvNode* const modlicense_interface;
     LilvNode* const modgui_gui;
     LilvNode* const modgui_resourcesDirectory;
     LilvNode* const modgui_iconTemplate;
@@ -262,6 +292,7 @@ struct NamespaceDefinitions {
           mod_rangeSteps           (lilv_new_uri(W, LILV_NS_MOD    "rangeSteps"        )),
           mod_release              (lilv_new_uri(W, LILV_NS_MOD    "releaseNumber"     )),
           mod_builder              (lilv_new_uri(W, LILV_NS_MOD    "builderVersion"    )),
+          modlicense_interface     (lilv_new_uri(W, MOD_LICENSE__interface             )),
           modgui_gui               (lilv_new_uri(W, LILV_NS_MODGUI "gui"               )),
           modgui_resourcesDirectory(lilv_new_uri(W, LILV_NS_MODGUI "resourcesDirectory")),
           modgui_iconTemplate      (lilv_new_uri(W, LILV_NS_MODGUI "iconTemplate"      )),
@@ -315,6 +346,7 @@ struct NamespaceDefinitions {
         lilv_node_free(mod_rangeSteps);
         lilv_node_free(mod_release);
         lilv_node_free(mod_builder);
+        lilv_node_free(modlicense_interface);
         lilv_node_free(modgui_gui);
         lilv_node_free(modgui_resourcesDirectory);
         lilv_node_free(modgui_iconTemplate);
@@ -964,9 +996,14 @@ const PluginInfo_Mini& _get_plugin_info_mini(const LilvPlugin* const p, const Na
     }
 
     // --------------------------------------------------------------------------------------------------------
-    // demo
+    // licensed
 
-    // TODO
+    if (KEYS_PATHlen > 0 && lilv_plugin_has_extension_data(p, ns.modlicense_interface))
+    {
+        const std::string licensefile(KEYS_PATH + sha1(info.uri));
+
+        info.licensed = std::ifstream(licensefile).good() ? 1 : -1;
+    }
 
     // --------------------------------------------------------------------------------------------------------
     // gui
@@ -1274,9 +1311,14 @@ const PluginInfo& _get_plugin_info(const LilvPlugin* const p, const NamespaceDef
         info.stability = kStabilityStable;
 
     // --------------------------------------------------------------------------------------------------------
-    // demo
+    // licensed
 
-    // TODO
+    if (KEYS_PATHlen > 0 && lilv_plugin_has_extension_data(p, ns.modlicense_interface))
+    {
+        const std::string licensefile(KEYS_PATH + sha1(info.uri));
+
+        info.licensed = std::ifstream(licensefile).good() ? 1 : -1;
+    }
 
     // --------------------------------------------------------------------------------------------------------
     // author name
@@ -2980,24 +3022,37 @@ const char* const* add_bundle_to_lilv_world(const char* const bundle)
     // fill in for any new plugins that appeared
     std::vector<std::string> addedPlugins;
 
-    LILV_FOREACH(plugins, itpls, PLUGINS)
+    // check plugins provided by this bundle
+    if (LilvWorld* const w = lilv_world_new())
     {
-        const LilvPlugin* const p = lilv_plugins_get(PLUGINS, itpls);
+#ifdef HAVE_NEW_LILV
+        lilv_world_load_specifications(w);
+        lilv_world_load_plugin_classes(w);
+#endif
 
-        std::string uri = lilv_node_as_uri(lilv_plugin_get_uri(p));
+        LilvNode* const b = lilv_new_file_uri(w, nullptr, cbundlepath);
+        lilv_world_load_bundle(w, b);
+        lilv_node_free(b);
 
-        if (std::find(BLACKLIST.begin(), BLACKLIST.end(), uri) != BLACKLIST.end())
-            continue;
+        const LilvPlugins* const plugins = lilv_world_get_all_plugins(w);
 
-        // check if it's already cached
-        if (PLUGNFO_Mini.count(uri) > 0)
-            continue;
+        LILV_FOREACH(plugins, itpls, plugins)
+        {
+            const LilvPlugin* const p = lilv_plugins_get(plugins, itpls);
 
-        // store new empty data
-        PLUGNFO[uri] = PluginInfo_Init;
-        PLUGNFO_Mini[uri] = PluginInfo_Mini_Init;
+            const std::string uri = lilv_node_as_uri(lilv_plugin_get_uri(p));
 
-        addedPlugins.push_back(uri);
+            if (std::find(BLACKLIST.begin(), BLACKLIST.end(), uri) != BLACKLIST.end())
+                continue;
+
+            // store new empty data
+            PLUGNFO[uri] = PluginInfo_Init;
+            PLUGNFO_Mini[uri] = PluginInfo_Mini_Init;
+
+            addedPlugins.push_back(uri);
+        }
+
+        lilv_world_free(w);
     }
 
     if (size_t plugCount = addedPlugins.size())
@@ -3070,7 +3125,7 @@ const char* const* remove_bundle_from_lilv_world(const char* const bundle)
 
         const LilvNodes* const bundles = lilv_plugin_get_data_uris(p);
 
-        std::string uri = lilv_node_as_uri(lilv_plugin_get_uri(p));
+        const std::string uri = lilv_node_as_uri(lilv_plugin_get_uri(p));
 
         if (PLUGNFO.count(uri) == 0)
             continue;
@@ -3263,7 +3318,7 @@ const PluginInfo_Mini* const* get_all_plugins(void)
 
         const LilvPlugin* const p = lilv_plugins_get(PLUGINS, itpls);
 
-        std::string uri = lilv_node_as_uri(lilv_plugin_get_uri(p));
+        const std::string uri = lilv_node_as_uri(lilv_plugin_get_uri(p));
 
         if (std::find(BLACKLIST.begin(), BLACKLIST.end(), uri) != BLACKLIST.end())
             continue;
@@ -3271,6 +3326,10 @@ const PluginInfo_Mini* const* get_all_plugins(void)
         // check if it's already cached
         if (PLUGNFO_Mini.count(uri) > 0 && PLUGNFO_Mini[uri].valid)
         {
+#if SHOW_ONLY_PLUGINS_WITH_MODGUI
+            if (PLUGNFO_Mini[uri].gui.resourcesDirectory == nc)
+                continue;
+#endif
             _get_plugs_mini_ret[curIndex++] = &PLUGNFO_Mini[uri];
             continue;
         }
@@ -3282,6 +3341,10 @@ const PluginInfo_Mini* const* get_all_plugins(void)
             continue;
 
         PLUGNFO_Mini[uri] = info;
+#if SHOW_ONLY_PLUGINS_WITH_MODGUI
+        if (info.gui.resourcesDirectory == nc)
+            continue;
+#endif
         _get_plugs_mini_ret[curIndex++] = &PLUGNFO_Mini[uri];
     }
 
